@@ -27,6 +27,7 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -161,7 +162,11 @@ object FileSystem {
   }
 
   /** Parses the module APK, extracts init lists, and loads DEXes into SharedMemory. */
-  fun loadModule(apkPath: String, obfuscate: Boolean): PreLoadedApk? {
+  fun loadModule(
+      apkPath: String,
+      obfuscate: Boolean,
+      fallbackMinApiVersion: Int = 0,
+  ): PreLoadedApk? {
     val file = File(apkPath)
     if (!file.exists()) return null
 
@@ -173,29 +178,25 @@ object FileSystem {
 
     runCatching {
           ZipFile(file).use { zip ->
-            // Parse module.prop to get targetApiVersion
-            val props =
-                zip.getEntry("META-INF/xposed/module.prop")?.let { entry ->
-                  zip.getInputStream(entry).bufferedReader().useLines { lines ->
-                    lines
-                        .filter { it.contains("=") }
-                        .associate {
-                          val parts = it.split("=", limit = 2)
-                          parts[0].trim() to parts[1].trim()
-                        }
-                  }
-                } ?: emptyMap()
+            val props = Properties()
+            zip.getEntry("META-INF/xposed/module.prop")?.let { entry ->
+              zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { props.load(it) }
+            }
 
-            val targetApi = props["targetApiVersion"]?.toIntOrNull() ?: 0
-            val hasLegacyFile = zip.getEntry("assets/xposed_init") != null
+            val minApi =
+                props.getProperty("minApiVersion")?.trim()?.toIntOrNull() ?: fallbackMinApiVersion
+            val hasModernEntry =
+                zip.getEntry("META-INF/xposed/java_init.list") != null ||
+                    zip.getEntry("META-INF/xposed/native_init.list") != null
+            val hasLegacyEntry =
+                zip.getEntry("assets/xposed_init") != null ||
+                    zip.getEntry("assets/native_init") != null
 
-            // Determine Loading Strategy based on Priority: API 101+ > Legacy > API 100
             val strategy =
                 when {
-                  targetApi >= 101 -> "MODERN"
-                  hasLegacyFile -> "LEGACY"
-                  targetApi == 100 -> "UNSUPPORTED" // API 100 is dropped
-                  else -> "NONE"
+                  hasModernEntry && minApi >= 101 -> "MODERN"
+                  hasLegacyEntry && minApi <= 94 -> "LEGACY"
+                  else -> "UNSUPPORTED"
                 }
 
             // Helper to read the list files
@@ -222,13 +223,12 @@ object FileSystem {
                 readList("assets/native_init", moduleLibraryNames)
               }
               "UNSUPPORTED" -> {
-                Log.w(TAG, "Module $apkPath uses API 100 which is no longer supported.")
+                Log.w(TAG, "Module $apkPath uses an unsupported Xposed API version.")
                 return null
               }
-              else -> return null // No valid init files found
             }
 
-            if (moduleClassNames.isEmpty()) return null
+            if (moduleClassNames.isEmpty() && moduleLibraryNames.isEmpty()) return null
 
             // Read DEX files
             var secondary = 1
@@ -245,7 +245,7 @@ object FileSystem {
           return null
         }
 
-    if (preLoadedDexes.isEmpty()) return null
+    if (preLoadedDexes.isEmpty() && moduleLibraryNames.isEmpty()) return null
 
     // Apply obfuscation
     if (obfuscate) {

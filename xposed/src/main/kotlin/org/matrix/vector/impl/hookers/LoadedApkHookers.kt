@@ -152,6 +152,17 @@ object LoadedApkCreateCLHooker : XposedInterface.Hooker {
 
             val ctx = PackageContextHelper.resolve(loadedApk, apkPackageName)
 
+            // Pre-Q devices do not have createAppFactory(), so use the classloader update path as the
+            // package-loaded fallback for Modern API 101 modules.
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && isInitialLoad) {
+                VectorLifecycleManager.dispatchPackageLoaded(
+                    ctx.packageName,
+                    appInfo,
+                    ctx.isFirstPackage,
+                    defaultClassLoader,
+                )
+            }
+
             // Dispatch Modern Lifecycle: onPackageReady
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val appComponentFactory = loadedApk.getFieldValue<Any>("mAppComponentFactory")

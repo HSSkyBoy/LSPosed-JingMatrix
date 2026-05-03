@@ -180,7 +180,9 @@ object ConfigCache {
               obsoletePaths[pkgName] = realApkPath
             }
 
-            val preLoadedApk = FileSystem.loadModule(apkPath, state.isDexObfuscateEnabled)
+            val preLoadedApk =
+                FileSystem.loadModule(
+                    apkPath, state.isDexObfuscateEnabled, readLegacyMinApiVersion(appInfo))
             if (preLoadedApk != null) {
               val module =
                   Module().apply {
@@ -399,11 +401,15 @@ object ConfigCache {
               uid = module.appId
             }
 
-            FileSystem.loadModule(apkPath, state.isDexObfuscateEnabled)?.let {
-              module.file = it
-              modules.add(module)
-              // We intentionally don't mutate state.modules here. Cache update will catch it.
-            }
+            FileSystem.loadModule(
+                    apkPath,
+                    state.isDexObfuscateEnabled,
+                    readLegacyMinApiVersion(module.applicationInfo))
+                ?.let {
+                  module.file = it
+                  modules.add(module)
+                  // We intentionally don't mutate state.modules here. Cache update will catch it.
+                }
           }
         }
     return modules
@@ -418,10 +424,20 @@ object ConfigCache {
       runCatching {
             java.util.zip.ZipFile(apk).use { zip ->
               zip.getEntry("META-INF/xposed/java_init.list") != null ||
-                  zip.getEntry("assets/xposed_init") != null
+                  zip.getEntry("META-INF/xposed/native_init.list") != null ||
+                  zip.getEntry("assets/xposed_init") != null ||
+                  zip.getEntry("assets/native_init") != null
             }
           }
           .getOrDefault(false)
+    }
+  }
+
+  private fun readLegacyMinApiVersion(info: ApplicationInfo?): Int {
+    val value = info?.metaData?.get("xposedminversion") ?: return 0
+    return when (value) {
+      is Number -> value.toInt()
+      else -> value.toString().trim().toIntOrNull() ?: 0
     }
   }
 

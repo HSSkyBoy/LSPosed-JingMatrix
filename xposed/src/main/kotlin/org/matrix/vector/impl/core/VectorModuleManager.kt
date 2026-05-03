@@ -1,11 +1,15 @@
 package org.matrix.vector.impl.core
 
 import android.os.Build
+import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.os.Process
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import java.io.File
 import org.lsposed.lspd.models.Module
+import org.lsposed.lspd.service.ILSPInjectedModuleService
+import org.lsposed.lspd.service.IRemotePreferenceCallback
 import org.lsposed.lspd.util.Utils.Log
 import org.matrix.vector.impl.VectorContext
 import org.matrix.vector.impl.VectorLifecycleManager
@@ -26,6 +30,12 @@ object VectorModuleManager {
     fun loadModule(module: Module, isSystemServer: Boolean, processName: String): Boolean {
         try {
             Log.d(TAG, "Loading module ${module.packageName}")
+            val preLoadedApk =
+                module.file
+                    ?: run {
+                        Log.e(TAG, "Module ${module.packageName} has no preloaded APK payload")
+                        return false
+                    }
 
             // Construct the native library search path
             val librarySearchPath = buildString {
@@ -42,7 +52,7 @@ object VectorModuleManager {
             val moduleClassLoader =
                 VectorModuleClassLoader.loadApk(
                     module.apkPath,
-                    module.file.preLoadedDexes,
+                    preLoadedApk.preLoadedDexes,
                     librarySearchPath,
                     initLoader,
                 )
@@ -57,15 +67,23 @@ object VectorModuleManager {
             }
 
             // Create the Context that will be injected into the module
+            val moduleApplicationInfo =
+                module.applicationInfo
+                    ?: android.content.pm.ApplicationInfo().apply {
+                        packageName = module.packageName
+                        sourceDir = module.apkPath
+                        publicSourceDir = module.apkPath
+                        uid = module.appId
+                    }
             val vectorContext =
                 VectorContext(
                     packageName = module.packageName,
-                    applicationInfo = module.applicationInfo,
-                    service = module.service, // Our IPC client
+                    applicationInfo = moduleApplicationInfo,
+                    service = module.service ?: EmptyInjectedModuleService,
                 )
 
             // Instantiate the module entry classes
-            for (className in module.file.moduleClassNames) {
+            for (className in preLoadedApk.moduleClassNames) {
                 runCatching {
                         val moduleClass = moduleClassLoader.loadClass(className)
                         Log.v(TAG, "Loading class $moduleClass")
@@ -98,7 +116,7 @@ object VectorModuleManager {
             }
 
             // Register any native JNI entrypoints declared by the module
-            module.file.moduleLibraryNames.forEach { libraryName ->
+            preLoadedApk.moduleLibraryNames.forEach { libraryName ->
                 NativeAPI.recordNativeEntrypoint(libraryName)
             }
 
@@ -108,5 +126,20 @@ object VectorModuleManager {
             Log.e(TAG, "Fatal error loading module ${module.packageName}", e)
             return false
         }
+    }
+
+    private object EmptyInjectedModuleService : ILSPInjectedModuleService.Stub() {
+        override fun getFrameworkProperties(): Long = 0L
+
+        override fun requestRemotePreferences(
+            group: String?,
+            callback: IRemotePreferenceCallback?,
+        ): Bundle {
+            return Bundle().apply { putSerializable("map", HashMap<String, Any>()) }
+        }
+
+        override fun openRemoteFile(path: String?): ParcelFileDescriptor? = null
+
+        override fun getRemoteFileList(): Array<String> = emptyArray()
     }
 }

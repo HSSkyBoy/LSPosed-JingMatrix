@@ -305,7 +305,7 @@ public final class XposedInit {
             return false;
         }
         initNativeModule(file.moduleLibraryNames);
-        return initModule(mcl, apk, file.moduleClassNames);
+        return initModule(mcl, apk, file.moduleClassNames) || !file.moduleLibraryNames.isEmpty();
     }
 
     public final static Set<String> loadedPackagesInProcess = ConcurrentHashMap.newKeySet(1);
