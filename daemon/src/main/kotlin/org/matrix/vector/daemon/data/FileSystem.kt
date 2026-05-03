@@ -38,6 +38,20 @@ import org.matrix.vector.daemon.BuildConfig
 import org.matrix.vector.daemon.utils.ObfuscationManager
 
 private const val TAG = "VectorFileSystem"
+private const val FRAMEWORK_API_VERSION = 101
+private const val MODERN_TARGET_API_VERSION = 101
+private const val LEGACY_MAX_API_VERSION = 94
+
+private enum class ModuleLoadStrategy {
+  LEGACY,
+  MODERN,
+  UNSUPPORTED,
+}
+
+private data class ModuleApiVersions(
+    val minApiVersion: Int,
+    val targetApiVersion: Int,
+)
 
 object FileSystem {
   val basePath: Path = Paths.get("/data/adb/lspd")
@@ -194,13 +208,7 @@ object FileSystem {
 
     runCatching {
           ZipFile(file).use { zip ->
-            val props = Properties()
-            zip.getEntry("META-INF/xposed/module.prop")?.let { entry ->
-              zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { props.load(it) }
-            }
-
-            val minApi =
-                props.getProperty("minApiVersion")?.trim()?.toIntOrNull() ?: fallbackMinApiVersion
+            val apiVersions = readModuleApiVersions(zip, fallbackMinApiVersion)
             val hasModernEntry =
                 zip.getEntry("META-INF/xposed/java_init.list") != null ||
                     zip.getEntry("META-INF/xposed/native_init.list") != null
@@ -209,36 +217,20 @@ object FileSystem {
                     zip.getEntry("assets/native_init") != null
 
             val strategy =
-                when {
-                  hasModernEntry && minApi >= 101 -> "MODERN"
-                  hasLegacyEntry && minApi <= 94 -> "LEGACY"
-                  else -> "UNSUPPORTED"
-                }
-
-            // Helper to read the list files
-            fun readList(name: String, dest: MutableList<String>) {
-              zip.getEntry(name)?.let { entry ->
-                zip.getInputStream(entry).bufferedReader().useLines { lines ->
-                  lines
-                      .map { it.trim() }
-                      .filter { it.isNotEmpty() && !it.startsWith("#") }
-                      .forEach { dest.add(it) }
-                }
-              }
-            }
+                determineModuleLoadStrategy(apiVersions, hasModernEntry, hasLegacyEntry)
 
             when (strategy) {
-              "MODERN" -> {
+              ModuleLoadStrategy.MODERN -> {
                 isLegacy = false
-                readList("META-INF/xposed/java_init.list", moduleClassNames)
-                readList("META-INF/xposed/native_init.list", moduleLibraryNames)
+                readZipList(zip, "META-INF/xposed/java_init.list", moduleClassNames)
+                readZipList(zip, "META-INF/xposed/native_init.list", moduleLibraryNames)
               }
-              "LEGACY" -> {
+              ModuleLoadStrategy.LEGACY -> {
                 isLegacy = true
-                readList("assets/xposed_init", moduleClassNames)
-                readList("assets/native_init", moduleLibraryNames)
+                readZipList(zip, "assets/xposed_init", moduleClassNames)
+                readZipList(zip, "assets/native_init", moduleLibraryNames)
               }
-              "UNSUPPORTED" -> {
+              ModuleLoadStrategy.UNSUPPORTED -> {
                 Log.w(TAG, "Module $apkPath uses an unsupported Xposed API version.")
                 return null
               }
@@ -284,6 +276,48 @@ object FileSystem {
     }
 
     return preLoadedApk
+  }
+
+  private fun readModuleApiVersions(
+      zip: ZipFile,
+      fallbackMinApiVersion: Int,
+  ): ModuleApiVersions {
+    val props = Properties()
+    zip.getEntry("META-INF/xposed/module.prop")?.let { entry ->
+      zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { props.load(it) }
+    }
+
+    val minApiVersion =
+        props.getProperty("minApiVersion")?.trim()?.toIntOrNull() ?: fallbackMinApiVersion
+    val targetApiVersion =
+        props.getProperty("targetApiVersion")?.trim()?.toIntOrNull() ?: minApiVersion
+    return ModuleApiVersions(minApiVersion, targetApiVersion)
+  }
+
+  private fun determineModuleLoadStrategy(
+      apiVersions: ModuleApiVersions,
+      hasModernEntry: Boolean,
+      hasLegacyEntry: Boolean,
+  ): ModuleLoadStrategy {
+    return when {
+      hasModernEntry &&
+          apiVersions.minApiVersion <= FRAMEWORK_API_VERSION &&
+          apiVersions.targetApiVersion >= MODERN_TARGET_API_VERSION -> ModuleLoadStrategy.MODERN
+      hasLegacyEntry && apiVersions.minApiVersion <= LEGACY_MAX_API_VERSION ->
+          ModuleLoadStrategy.LEGACY
+      else -> ModuleLoadStrategy.UNSUPPORTED
+    }
+  }
+
+  private fun readZipList(zip: ZipFile, name: String, dest: MutableList<String>) {
+    zip.getEntry(name)?.let { entry ->
+      zip.getInputStream(entry).bufferedReader().useLines { lines ->
+        lines
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .forEach { dest.add(it) }
+      }
+    }
   }
 
   /** Safely creates the log directory. If a file exists with the same name, it deletes it first. */
