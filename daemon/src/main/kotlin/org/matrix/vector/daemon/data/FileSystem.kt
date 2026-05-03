@@ -144,21 +144,37 @@ object FileSystem {
   }
 
   /** Loads a single DEX file into SharedMemory, optionally applying obfuscation. */
-  private fun readDex(inputStream: InputStream, obfuscate: Boolean): SharedMemory {
-    var memory = SharedMemory.create(null, inputStream.available())
-    val byteBuffer = memory.mapReadWrite()
-    Channels.newChannel(inputStream).read(byteBuffer)
-    SharedMemory.unmap(byteBuffer)
+  private fun readDex(inputStream: InputStream, size: Long, obfuscate: Boolean): SharedMemory {
+    require(size in 1..Int.MAX_VALUE) { "Invalid dex size: $size" }
 
-    if (obfuscate) {
-      val newMemory = ObfuscationManager.obfuscateDex(memory)
-      if (memory !== newMemory) {
-        memory.close()
-        memory = newMemory
+    var memory = SharedMemory.create(null, size.toInt())
+    try {
+      val byteBuffer = memory.mapReadWrite()
+      try {
+        Channels.newChannel(inputStream).use { channel ->
+          while (byteBuffer.hasRemaining()) {
+            if (channel.read(byteBuffer) < 0) {
+              throw java.io.EOFException("Unexpected EOF while reading dex")
+            }
+          }
+        }
+      } finally {
+        SharedMemory.unmap(byteBuffer)
       }
+
+      if (obfuscate) {
+        val newMemory = ObfuscationManager.obfuscateDex(memory)
+        if (memory !== newMemory) {
+          memory.close()
+          memory = newMemory
+        }
+      }
+      memory.setProtect(OsConstants.PROT_READ)
+      return memory
+    } catch (t: Throwable) {
+      memory.close()
+      throw t
     }
-    memory.setProtect(OsConstants.PROT_READ)
-    return memory
   }
 
   /** Parses the module APK, extracts init lists, and loads DEXes into SharedMemory. */
@@ -235,7 +251,9 @@ object FileSystem {
             while (true) {
               val entryName = if (secondary == 1) "classes.dex" else "classes$secondary.dex"
               val dexEntry = zip.getEntry(entryName) ?: break
-              zip.getInputStream(dexEntry).use { preLoadedDexes.add(readDex(it, obfuscate)) }
+              zip.getInputStream(dexEntry).use {
+                preLoadedDexes.add(readDex(it, dexEntry.size, obfuscate))
+              }
               secondary++
             }
           }
@@ -308,7 +326,10 @@ object FileSystem {
   fun getPreloadDex(obfuscate: Boolean): SharedMemory? {
     if (preloadDex == null) {
       runCatching {
-            FileInputStream("framework/lspd.dex").use { preloadDex = readDex(it, obfuscate) }
+            val preloadFile = File("framework/lspd.dex")
+            FileInputStream(preloadFile).use {
+              preloadDex = readDex(it, preloadFile.length(), obfuscate)
+            }
           }
           .onFailure { Log.e(TAG, "Failed to load framework dex", it) }
     }
