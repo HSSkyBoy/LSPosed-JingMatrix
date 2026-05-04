@@ -112,6 +112,17 @@ bool InstallNativeAPI(const lsplant::HookHandler &handler);
 void RegisterNativeLib(const std::string &library_name);
 
 /**
+ * @brief Eagerly loads and initializes a registered native module from a concrete path.
+ *
+ * This is used by rootless environments where relying on linker callbacks alone is too fragile.
+ *
+ * @param library_name The logical module library filename (e.g. "libmymodule.so").
+ * @param library_path The exact path passed to dlopen, including APK zip paths when applicable.
+ * @return True if the library was loaded and processed successfully.
+ */
+bool EagerInitializeNativeLib(const std::string &library_name, const std::string &library_path);
+
+/**
  * @brief A wrapper around DobbyHook.
  */
 inline int HookInline(void *original, void *replace, void **backup) {
